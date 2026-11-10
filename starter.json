@@ -1,0 +1,21 @@
+{
+  "name": "Quad Pong",
+  "genre": "sports",
+  "dim": "2D",
+  "mode": "Party",
+  "players": "2–4",
+  "hook": "Four walls, four paddles, more balls. Last one in wins.",
+  "how": "Slide your paddle along your wall and bounce every ball away. Let one past and you lose a life; lose all 3 and your wall closes. A new ball joins every 15 seconds.",
+  "controls": "Mouse or ← → to slide your paddle · touch: drag",
+  "uses": [
+    ["Host-run physics", "One player's browser moves the balls and counts lives, so everyone sees the same bounces; if it leaves, the next player takes over."],
+    ["Bots", "Bots guard every empty wall, and take over the wall of anyone who leaves."],
+    ["Leaderboard", "Most wins, for every player."],
+    ["Live sync", "Every paddle and ball moves for everyone at once."]
+  ],
+  "ideas": [
+    "Make the paddles shrink each time you lose a life",
+    "Add a power-up ball that splits in two",
+    "Turn it into an ice rink with pucks"
+  ]
+}

@@ -1,0 +1,650 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Quad Pong</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; overscroll-behavior: none; background: #0a0618; }
+  body { font: 15px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; color: #f1ecff; user-select: none; -webkit-user-select: none; }
+  canvas { display: block; width: 100vw; height: 100vh; height: 100dvh; touch-action: none; cursor: none; }
+  [hidden] { display: none !important; }
+  .hud { position: fixed; pointer-events: none; text-shadow: 0 1px 4px #000c; left: 0; right: 0; text-align: center; }
+  #top { top: max(8px, env(safe-area-inset-top)); font-weight: 700; font-size: 14px; }
+  #hint { top: calc(max(8px, env(safe-area-inset-top)) + 24px); font-size: 14px; opacity: .9; transition: opacity 1s; }
+  #msg { top: 50%; transform: translateY(-50%); font: 900 min(18vw, 96px)/1 system-ui, sans-serif; letter-spacing: .03em; opacity: 0; transition: opacity .2s, transform .2s; }
+  #msg small { display: block; margin-top: 8px; font-size: 18px; font-weight: 700; letter-spacing: 0; }
+  #msg.on { opacity: 1; transform: translateY(-50%) scale(1.06); }
+  #net { bottom: max(6px, env(safe-area-inset-bottom)); font-size: 12px; opacity: .75; }
+  #over { position: fixed; inset: 0; display: grid; place-items: center; background: #0a0618b8; }
+  .card { box-sizing: border-box; width: min(380px, calc(100vw - 32px)); max-height: 86vh; overflow: auto; padding: 22px; border-radius: 16px; background: #1a1236; border: 1px solid #ffffff26; text-align: center; }
+  .card h2 { margin: 0 0 4px; font-size: 27px; }
+  .card h3 { margin: 14px 0 4px; font-size: 14px; color: #ffd166; text-align: left; }
+  .card ol { text-align: left; margin: 0; padding-left: 26px; font-size: 14px; min-height: 22px; }
+  .card li span { float: right; font-variant-numeric: tabular-nums; } .card li.me { color: #ffd166; font-weight: 700; }
+  .card p { margin: 8px 0 0; font-size: 13px; opacity: .8; }
+  button.go { width: 100%; min-height: 48px; margin-top: 14px; border: 0; border-radius: 12px; background: #b388ff; color: #1a0b33; font: 800 17px system-ui, sans-serif; cursor: pointer; }
+</style>
+<script src="https://cdn.multiplayeragent.com/sdk/mp.global.js"></script>
+</head>
+<body>
+<canvas id="game"></canvas>
+<div class="hud" id="top"></div>
+<div class="hud" id="hint"></div>
+<div class="hud" id="msg"></div>
+<div class="hud" id="net">Connecting…</div>
+<div id="over" hidden><div class="card">
+  <h2 id="winner"></h2>
+  <h3>This match</h3><ol id="ranking"></ol>
+  <h3>Most wins</h3><ol id="board"><li>Loading…</li></ol>
+  <button class="go" id="again">Play again</button><p id="next"></p>
+</div></div>
+<script>
+/* ═══ QUAD PONG · a Multiplayer Agent starter ═════════════════════════════════════════
+ * Four paddles on four walls. Let a ball past you and you lose a life; lose them all and
+ * your wall closes. Last paddle standing wins. Party, 2–4 players; bots take empty walls.
+ * More balls join the longer it goes.
+ *
+ * WHERE THINGS ARE (search for the "── " headers):
+ *   CONFIG ........ lives, balls, speeds, paddle size, the bots
+ *   CONNECTION .... MP_CONNECT, joining, the offline room, who is host
+ *   ARENA ......... the square, its corners, and turning a wall's point of view (seat 0 = bottom)
+ *   PHYSICS ....... the balls: paddles, closed walls, corners, going out (the host and everyone's prediction use it)
+ *   MATCH (HOST) .. seats, lives, new balls, who's out, the winner, the bot paddles. Only the host writes these.
+ *   ME ............ my paddle; my own hits on the balls
+ *   DRAW .......... the arena turned so YOUR wall is at the bottom, paddles, balls, trails, sparks
+ *   HUD & RESULTS . lives, messages, results card, leaderboard
+ *   INPUT ......... mouse, finger, arrow keys
+ *
+ * HOW THE MULTIPLAYER WORKS (a relay room: no server code):
+ *   - Each player writes its OWN entity: `pad` (where its paddle is along its wall, in arena
+ *     units) about 20 times a second, `hb` (heartbeat) once a second, `rdy` (Play again), `n`/`c` once.
+ *   - The HOST is the lowest sessionId among live players (heartbeat seen in the last 3s), worked
+ *     out every frame. Only the host writes the shared fields:
+ *       `game` {id, v, phase, seats, lives, out, win, startAt, nextBallAt, overAt}: who has which wall
+ *              (a sessionId or "bot"), lives left, the order people went out. `v` goes up on every write.
+ *       `balls` {s, b, p}: every ball [id, x, y, vx, vy, hits, launchAt] ~15 times a second
+ *              (s = write number, p = the bot paddles).
+ *   - The host moves the balls against the corners, the closed walls, its own paddle and the bot
+ *     paddles. Everyone else runs the balls on their own screen between writes and decides THEIR
+ *     OWN hits: when your paddle hits a ball on your screen, it bounces at once and you send "hit"
+ *     {k, x, y, vx, vy, g}; the host checks it is plausible and adopts it. A ball that goes past
+ *     your wall on the host's screen waits `outGrace` ms for your save before you lose the life.
+ *   - Someone who joins mid-match takes over a bot's wall (and its lives); someone who leaves
+ *     is replaced by a bot. A new host adopts `game` and `balls` and carries on.
+ *   - ?attract plays offline, four bots and three balls (the preview video is recorded from it).
+ *   - Leaderboard "wins": each match you win adds 1 to your total.
+ */
+
+// ── CONFIG ──────────────────────────────────────────────────────────────────────────
+const CONFIG = {
+  lives: 3,             // balls each wall can let past
+  startBalls: 1,        // balls at the start of a match...
+  maxBalls: 3,          // ...one more every extraBallMs, up to this many
+  extraBallMs: 15000,
+  arena: 800,           // the square's side, in arena units
+  corner: 70,           // the solid blocks in each corner
+  paddleL: 150, paddleT: 16, ballR: 13,
+  ballSpeed: 380,       // a new ball's speed, units/s
+  speedUp: 1.05,        // each paddle hit makes the ball this much faster...
+  maxSpeed: 950,        // ...up to this
+  maxAngle: 1.0,        // radians: hit it with the paddle's tip and it leaves at this angle
+  padSpeed: 2400,       // fastest your paddle follows the pointer, units/s
+  keySpeed: 760,        // paddle speed with the arrow keys
+  botSpeed: 560,        // the bots' paddle speed
+  botError: 46,         // how far off a bot lines up, units
+  botThink: 150,        // ms between bot decisions
+  countdownMs: 3000,    // before a match
+  respawnMs: 900,       // a lost ball waits this long in the middle
+  resultsMs: 9000,      // ms on the results card before the next match
+  sendMs: 50,           // my paddle (~20 a second)
+  ballSendMs: 66,       // the balls (~15 a second)
+  outGrace: 200,        // ms someone else has to save a ball that went past their wall on the host's screen
+  board: "wins",
+};
+const COLORS = ["#ff4d8d", "#36d6ff", "#ffd23f", "#5cff9d", "#b388ff", "#ff9b42", "#ff6bf0", "#3dffe0"];
+const BOT_NAMES = ["Pongo", "Blip", "Zap", "Bounce"];
+
+// ── CONNECTION ──────────────────────────────────────────────────────────────────────
+// The builder fills these in for this game. Downloaded from GitHub? Put your own pk_ key here.
+const MP_CONNECT = {
+  key: 'pk_REPLACE_ME',
+  room: 'quad-pong',
+  endpoint: 'wss://live.multiplayeragent.com',
+  apiUrl: 'https://api.multiplayeragent.com',
+};
+const ATTRACT = new URLSearchParams(location.search).has("attract");
+
+/** Same shape as the SDK client, kept in this tab: offline play and ?attract. */
+function localRoom() {
+  const id = "local", state = { entities: { players: { [id]: {} } }, shared: {} }, subs = [];
+  let queued = false;
+  const emit = () => { if (!queued) { queued = true; queueMicrotask(() => { queued = false; subs.forEach((f) => f(state)); }); } };
+  const put = (o, k, v) => { if (typeof k === "object") Object.assign(o, k); else o[k] = v; emit(); };
+  return {
+    sessionId: id, state, offline: true,
+    me: { set: (k, v) => put(state.entities.players[id], k, v) },
+    setShared: (k, v) => put(state.shared, k, v),
+    onState: (f) => { subs.push(f); f(state); }, onJoin() {}, onLeave() {}, on() {}, send() {},
+    onDisconnect() {}, onReconnect() {}, leave: async () => {},
+  };
+}
+async function connect() {
+  if (ATTRACT || typeof MP === "undefined") return localRoom();
+  try {
+    const mp = await Promise.race([MP.join({ ...MP_CONNECT }), new Promise((_, no) => setTimeout(() => no(new Error("timed out")), 10000))]);
+    window.mp = mp; // the builder calls window.mp.leave() when the page closes
+    return mp;
+  } catch (e) {
+    console.warn("Playing offline:", e && e.message);
+    return localRoom();
+  }
+}
+const parse = (v, fb) => { if (typeof v !== "string") return fb; try { return JSON.parse(v); } catch { return fb; } };
+const memo = new Map();
+/** A JSON field, parsed once per change (read-only: never mutate what this returns). */
+function cached(key, raw, fb) { const m = memo.get(key); if (m && m.raw === raw) return m.v; const v = parse(raw, fb); memo.set(key, { raw, v }); return v; }
+let net = null, S = { entities: { players: {} }, shared: {} };
+const seenHb = new Map();
+/** Players whose heartbeat moved in the last 3s (plus us), sorted by sessionId. */
+function livePlayers() {
+  const now = performance.now(), out = [];
+  for (const [id, p] of Object.entries(S.entities.players || {})) {
+    const s = seenHb.get(id);
+    if (!s || s.hb !== p.hb) seenHb.set(id, { hb: p.hb, at: now });
+    if (id === net.sessionId || now - seenHb.get(id).at < 3000) out.push(id);
+  }
+  return out.sort();
+}
+const isHost = () => livePlayers()[0] === net.sessionId;
+const humans = () => livePlayers().filter((id) => !(ATTRACT && id === net.sessionId)); // in the preview you only watch
+
+// ── ARENA ───────────────────────────────────────────────────────────────────────────
+// Arena units, y down like the screen: x and y run -HA..HA. Seat 0 is the bottom wall, 1 the right,
+// 2 the top, 3 the left. Each seat sees the arena turned so its own wall is at the bottom: in a seat's
+// LOCAL view its wall is the line y = HA and its paddle slides along x. Most of the code works in that view.
+const HA = CONFIG.arena / 2, C = CONFIG.corner, PY = HA - 24; // PY = the paddle's middle line, just inside the wall
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const TURN = [[1, 0], [0, 1], [-1, 0], [0, -1]]; // [cos, sin] of a quarter turn per seat
+/** A point or direction from the arena into seat `s`'s view, and back. */
+function toLocal(s, x, y) { const [c, n] = TURN[s]; return [c * x - n * y, n * x + c * y]; }
+function toWorld(s, x, y) { const [c, n] = TURN[s]; return [c * x + n * y, c * y - n * x]; }
+const PAD_MAX = HA - C - CONFIG.paddleL / 2; // a paddle slides between -PAD_MAX and PAD_MAX
+/** Run `fn` on ball `b` as seat `s` sees it (position and speed turned), then turn it back. */
+function inSeat(s, b, fn) {
+  const [x, y] = toLocal(s, b.x, b.y), [vx, vy] = toLocal(s, b.vx, b.vy), l = { x, y, vx, vy };
+  const r = fn(l);
+  [b.x, b.y] = toWorld(s, l.x, l.y); [b.vx, b.vy] = toWorld(s, l.vx, l.vy);
+  return r;
+}
+
+// ── PHYSICS ─────────────────────────────────────────────────────────────────────────
+/** A ball in a seat's view meets that seat's paddle at `p`: where it hits sets the angle, like classic pong. */
+function hitPaddle(l, p) {
+  const r = CONFIG.ballR + CONFIG.paddleT / 2, cx = clamp(l.x, p - CONFIG.paddleL / 2, p + CONFIG.paddleL / 2);
+  if (l.vy <= 0 || l.y > PY + CONFIG.paddleT / 2 || Math.hypot(l.x - cx, l.y - PY) >= r) return false;
+  const off = clamp((l.x - p) / (CONFIG.paddleL / 2), -1, 1), a = off * CONFIG.maxAngle;
+  const sp = Math.min(CONFIG.maxSpeed, Math.hypot(l.vx, l.vy) * CONFIG.speedUp);
+  l.vx = Math.sin(a) * sp; l.vy = -Math.cos(a) * sp; l.y = Math.min(l.y, PY - r);
+  return true;
+}
+/** Move ball `b` dt seconds. `pads` = [{seat, p}] paddles that can hit it; `open[s]` = seat s's wall is a goal (else solid).
+ *  Returns { hit: the seat whose paddle hit it or -1, bounce, out: the seat it went out past, or -1 }. */
+function stepBall(b, dt, pads, open) {
+  const out = { hit: -1, bounce: false, out: -1 }, r = CONFIG.ballR;
+  const n = Math.max(1, Math.ceil((Math.hypot(b.vx, b.vy) * dt) / 8));
+  for (let i = 0; i < n; i++) {
+    b.x += (b.vx * dt) / n; b.y += (b.vy * dt) / n;
+    for (const q of pads) if (inSeat(q.seat, b, (l) => hitPaddle(l, q.p))) out.hit = q.seat;
+    if (Math.abs(b.x) > HA - C - r && Math.abs(b.y) > HA - C - r) { // a corner block: bounce off its nearer face
+      const dx = Math.abs(b.x) - (HA - C - r), dy = Math.abs(b.y) - (HA - C - r);
+      if (dx < dy) { b.x = Math.sign(b.x) * (HA - C - r); b.vx = -Math.sign(b.x) * Math.abs(b.vx); }
+      else { b.y = Math.sign(b.y) * (HA - C - r); b.vy = -Math.sign(b.y) * Math.abs(b.vy); }
+      out.bounce = true;
+    }
+    for (let s = 0; s < 4; s++) inSeat(s, b, (l) => {
+      if (!open[s] && l.y > HA - r) { l.y = HA - r; l.vy = -Math.abs(l.vy); out.bounce = true; } // a closed wall
+      else if (open[s] && l.y > HA + r) out.out = s;                                           // past an open wall
+    });
+    if (out.out >= 0) break;
+  }
+  return out;
+}
+/** A ball that was lost: wait in the middle, then fly at a random wall that's still open. */
+function launchBall(b, open, at) {
+  const seats = [0, 1, 2, 3].filter((s) => open[s]), s = seats[Math.floor(Math.random() * seats.length)] ?? 0;
+  const a = (Math.random() - 0.5) * 0.8, [vx, vy] = toWorld(s, Math.sin(a) * CONFIG.ballSpeed, Math.cos(a) * CONFIG.ballSpeed);
+  Object.assign(b, { x: 0, y: 0, vx, vy, at });
+}
+
+// ── MATCH (HOST) ────────────────────────────────────────────────────────────────────
+const host = { last: null, wasHost: false, bots: [null, null, null, null], lastBalls: 0, lastBody: "", pending: new Map(), nextK: 1 };
+let balls = []; // [{k, x, y, vx, vy, h, at}]: the host's real balls; everyone else's prediction of them
+/** The game as state has it, or the host's own newer write that hasn't come back yet. `v` only goes up. */
+function game() {
+  const g = cached("game", S.shared.game, null);
+  return host.last && isHost() && (!g || host.last.v > g.v) ? host.last : g;
+}
+function writeGame(g) { g = { ...g, v: (game()?.v ?? 0) + 1 }; host.last = g; net.setShared("game", JSON.stringify(g)); return g; }
+const openWalls = (g) => g.lives.map((n) => n > 0);
+/** A fresh match: people on random walls, bots on the rest, everyone on full lives. */
+function newGame(id) {
+  const seats = ["bot", "bot", "bot", "bot"], free = [0, 1, 2, 3].sort(() => Math.random() - 0.5), t = Date.now();
+  humans().slice(0, 4).forEach((p, i) => { seats[free[i]] = p; });
+  const startAt = t + CONFIG.countdownMs, g = { id, phase: "play", seats, lives: [0, 1, 2, 3].map(() => CONFIG.lives), out: [], win: -1, startAt, nextBallAt: startAt + CONFIG.extraBallMs, overAt: 0 };
+  balls = [];
+  for (let i = 0; i < CONFIG.startBalls; i++) { const b = { k: host.nextK++, h: 0 }; launchBall(b, openWalls(g), startAt + i * 700); balls.push(b); }
+  host.pending.clear(); writeBalls();
+  return g;
+}
+function writeBalls(onlyIfMoved) {
+  const r = Math.round, p = host.bots.map((q) => (q ? r(q.p) : null));
+  const body = JSON.stringify({ b: balls.map((b) => [b.k, r(b.x), r(b.y), r(b.vx), r(b.vy), b.h, b.at]), p });
+  host.lastBalls = performance.now();
+  if (onlyIfMoved && body === host.lastBody) return; // nothing moved: save the message
+  host.lastBody = body; host.s = (host.s || 0) + 1;
+  net.setShared("balls", body.slice(0, -1) + `,"s":${host.s}}`);
+}
+/** Become host: take over the game, the balls and the bot paddles exactly as state has them. */
+function adopt() {
+  host.wasHost = true; host.pending.clear();
+  const s = parse(S.shared.balls, null);
+  if (s) { // our own screen has been running the balls on from this write: keep those (the write can be seconds old if the old host froze)
+    if (s.s !== pred.lastS || !balls.length) balls = (s.b || []).map(([k, x, y, vx, vy, h, at]) => ({ k, x, y, vx, vy, h, at }));
+    for (const b of balls) b.gone = false;
+    host.s = s.s; host.nextK = Math.max(0, ...balls.map((b) => b.k)) + 1;
+    host.bots = [0, 1, 2, 3].map((i) => (s.p && s.p[i] !== null && s.p[i] !== undefined ? newBot(s.p[i]) : null));
+  }
+}
+const newBot = (p = 0) => ({ p, aim: 0, thinkAt: 0, err: 0 });
+/** Seats: someone who left is replaced by a bot (their lives stay); someone new takes a bot's wall that's still in. */
+function checkSeats(g) {
+  const people = humans();
+  let seats = g.seats.map((id) => (id === "bot" || people.includes(id) ? id : "bot"));
+  for (const id of people) {
+    if (seats.includes(id) || g.phase === "over") continue;
+    const free = [0, 1, 2, 3].find((s) => seats[s] === "bot" && g.lives[s] > 0);
+    if (free !== undefined) seats[free] = id;
+  }
+  return seats.join() !== g.seats.join() ? writeGame({ ...g, seats }) : g;
+}
+/** A ball went out past seat `s`: one life less, maybe out, maybe the match. */
+function loseLife(g, s, b, t) {
+  const lives = [...g.lives]; lives[s] = Math.max(0, lives[s] - 1);
+  const out = lives[s] === 0 && !g.out.includes(s) ? [...g.out, s] : g.out;
+  b.h++; launchBall(b, lives.map((n) => n > 0), t + CONFIG.respawnMs);
+  return writeGame({ ...g, lives, out });
+}
+function hostTick(dt, now) {
+  if (!host.wasHost) adopt();
+  const t = Date.now();
+  let g = game();
+  if (!g) g = writeGame(newGame(1));
+  g = checkSeats(g);
+  if (g.phase === "over") {
+    const seated = g.seats.filter((id) => id !== "bot");
+    const ready = seated.length && seated.every((id) => (id === net.sessionId ? myReady : (S.entities.players[id] || {}).rdy) === g.id);
+    if (t > g.overAt || ready) g = writeGame(newGame(g.id + 1));
+  }
+  for (let s = 0; s < 4; s++) { // bot paddles exist only on bot walls that are still open
+    if (g.seats[s] === "bot" && g.lives[s] > 0) { host.bots[s] = host.bots[s] || newBot(); botMove(host.bots[s], s, dt, now); }
+    else host.bots[s] = null;
+  }
+  if (g.phase === "play") {
+    if (t >= g.nextBallAt && balls.length < CONFIG.maxBalls) { // one more ball
+      const b = { k: host.nextK++, h: 0 }; launchBall(b, openWalls(g), t + 600); balls.push(b);
+      g = writeGame({ ...g, nextBallAt: t + CONFIG.extraBallMs });
+    }
+    const open = openWalls(g), pads = padsForHost(g);
+    for (const b of balls) {
+      if (b.at > t || host.pending.has(b.k)) continue;
+      const res = stepBall(b, dt, pads, open);
+      if (res.hit >= 0) { b.h++; hitFx(b, res.hit); writeBalls(); }
+      if (res.bounce) bumpFx();
+      if (res.out >= 0) { // past a wall: count it now, or give that player's screen a moment to send a save
+        const id = g.seats[res.out], remote = id !== "bot" && id !== net.sessionId;
+        host.pending.set(b.k, { s: res.out, at: now + (remote ? CONFIG.outGrace : 0) });
+      }
+    }
+    for (const [k, p] of host.pending) {
+      if (now < p.at) continue;
+      host.pending.delete(k);
+      const b = balls.find((q) => q.k === k);
+      if (b && g.lives[p.s] > 0) { g = loseLife(g, p.s, b, t); writeBalls(); }
+    }
+    const left = [0, 1, 2, 3].filter((s) => g.lives[s] > 0), peopleIn = left.some((s) => g.seats[s] !== "bot");
+    if (left.length <= 1 || (!peopleIn && !ATTRACT && g.seats.some((id) => id !== "bot"))) { // one left (none = a draw), or only bots are
+      const win = left.length ? left.reduce((a, s) => (g.lives[s] > g.lives[a] ? s : a), left[0]) : -1;
+      g = writeGame({ ...g, phase: "over", win, out: [...g.out, ...left.filter((s) => s !== win)], overAt: t + CONFIG.resultsMs });
+    }
+  }
+  if (now - host.lastBalls > CONFIG.ballSendMs) writeBalls(true);
+}
+/** The paddles the host bounces balls off: its own and the bots'. Other people decide their own hits. */
+function padsForHost(g) {
+  const pads = [];
+  host.bots.forEach((q, s) => { if (q) pads.push({ seat: s, p: q.p }); });
+  const mine = g.seats.indexOf(net.sessionId);
+  if (mine >= 0 && g.lives[mine] > 0) pads.push({ seat: mine, p: me.p });
+  return pads;
+}
+/** A "hit" from a player on someone else's screen: adopt its bounce if it happened near where the host has that ball. */
+function applyHit(msg, from) {
+  const g = game();
+  if (!g || g.phase !== "play" || msg.g !== g.id) return;
+  const s = g.seats.indexOf(from), b = balls.find((q) => q.k === msg.k), x = +msg.x, y = +msg.y, vx = +msg.vx, vy = +msg.vy;
+  if (s < 0 || !b || g.lives[s] <= 0 || !isFinite(x + y + vx + vy) || Math.hypot(x - b.x, y - b.y) > 220) return;
+  if (toLocal(s, x, y)[1] < HA - 140) return; // a hit happens by your own wall
+  const k = Math.min(1, CONFIG.maxSpeed / (Math.hypot(vx, vy) || 1));
+  Object.assign(b, { x, y, vx: vx * k, vy: vy * k }); b.h++;
+  host.pending.delete(b.k); // saved on the line
+  hitFx(b, s); writeBalls();
+}
+/** A bot: line up with the ball that will reach its wall first; drift to the middle when none is coming. */
+function botMove(q, s, dt, now) {
+  if (now > q.thinkAt) {
+    q.thinkAt = now + CONFIG.botThink * (0.7 + Math.random() * 0.6);
+    q.err = (Math.random() - 0.5) * 2 * CONFIG.botError;
+    let best = null, soonest = 4;
+    for (const b of balls) {
+      if (b.at > Date.now()) continue;
+      const [x, y] = toLocal(s, b.x, b.y), [vx, vy] = toLocal(s, b.vx, b.vy);
+      if (vy < 40) continue;
+      const tt = (PY - CONFIG.ballR - y) / vy;
+      if (tt < 0 || tt > soonest) continue;
+      let hx = x + vx * tt; const lim = HA - CONFIG.ballR; // fold the path off the side walls
+      for (let i = 0; i < 4 && Math.abs(hx) > lim; i++) hx = Math.sign(hx) * 2 * lim - hx;
+      soonest = tt; best = hx;
+    }
+    q.aim = best === null ? q.aim * 0.5 : best + q.err;
+  }
+  const d = clamp(q.aim, -PAD_MAX, PAD_MAX) - q.p;
+  q.p += clamp(d, -CONFIG.botSpeed * dt, CONFIG.botSpeed * dt);
+}
+
+// ── ME ──────────────────────────────────────────────────────────────────────────────
+let myName = "";
+try { myName = localStorage.getItem("mpa-name") || ""; } catch {}
+myName = myName || ["Zippy", "Lucky", "Neon", "Turbo", "Pixel", "Cosmic"][Math.floor(Math.random() * 6)] + " " + ["Paddle", "Bat", "Blocker", "Wall", "Spinner"][Math.floor(Math.random() * 5)];
+let myColor = COLORS[0], myReady = 0; // the color is picked on join: the first one nobody in the room has
+const me = { p: 0, target: 0, lastSend: 0, lastSent: null, lastHit: 0, seat: -1, gameId: -1 };
+const pred = { lastS: -1, mineAt: 0 }; // a non-host's ball prediction
+function myTick(dt, g, now) {
+  const seat = g.seats.indexOf(net.sessionId), t = Date.now(), playing = seat >= 0 && g.lives[seat] > 0;
+  if (seat !== me.seat || g.id !== me.gameId) { me.seat = seat; me.gameId = g.id; me.p = me.target = 0; }
+  if (playing) {
+    const keyDir = (keys.has("arrowright") || keys.has("d") ? 1 : 0) - (keys.has("arrowleft") || keys.has("a") ? 1 : 0);
+    if (keyDir) me.target = clamp(me.p + keyDir * CONFIG.keySpeed * dt, -PAD_MAX, PAD_MAX);
+    me.p += clamp(clamp(me.target, -PAD_MAX, PAD_MAX) - me.p, -CONFIG.padSpeed * dt, CONFIG.padSpeed * dt);
+    const p = Math.round(me.p);
+    if (now - me.lastSend > CONFIG.sendMs && p !== me.lastSent) { me.lastSend = now; me.lastSent = p; net.me.set("pad", p); }
+  }
+  if (isHost()) return;
+  // Not the host: our balls run on their own between writes. A write replaces a ball only when something new
+  // happened to it there (more hits than we know of, a relaunch), or when we drifted far off. A write is always a
+  // little old, so one with the same hit count would drag the ball back in time (and through our own paddle).
+  const s = cached("balls", S.shared.balls, null);
+  if (s && s.s !== pred.lastS) {
+    pred.lastS = s.s;
+    balls = (s.b || []).map(([k, x, y, vx, vy, h, at]) => {
+      const b = balls.find((q) => q.k === k);
+      if (!b) return { k, x, y, vx, vy, h, at, ox: 0, oy: 0 };
+      const off = Math.hypot(b.x - x, b.y - y), drift = 60 + Math.hypot(vx, vy) * 0.25;
+      if (h > b.h || at !== b.at || b.gone || (h === b.h && off > drift) || (h < b.h && now - pred.mineAt > 500)) {
+        if (h > b.h && off < 250) { b.ox += b.x - x; b.oy += b.y - y; } // draw the jump smoothly
+        if (h > b.h && at === b.at) hitFx(b, -1);
+        Object.assign(b, { x, y, vx, vy, h, at, gone: false });
+      }
+      return b;
+    });
+  }
+  if (g.phase !== "play") return;
+  const open = openWalls(g), pads = [];
+  for (let k = 0; k < 4; k++) { const p = padOf(g, k); if (p !== null && g.lives[k] > 0) pads.push({ seat: k, p }); }
+  for (const b of balls) {
+    if (b.at > t || b.gone) continue;
+    const res = stepBall(b, dt, pads, open);
+    if (res.bounce) bumpFx();
+    if (res.out >= 0) b.gone = true; // the host decides what happens next; wait for its write
+    if (res.hit === seat && playing && now - me.lastHit > 40) { // my paddle hit it on my screen: that's the hit
+      me.lastHit = now; b.h++; pred.mineAt = now; hitFx(b, seat);
+      const r = Math.round;
+      net.send("hit", { k: b.k, x: r(b.x), y: r(b.y), vx: r(b.vx), vy: r(b.vy), g: g.id });
+    }
+  }
+}
+
+// ── DRAW ────────────────────────────────────────────────────────────────────────────
+const cv = document.getElementById("game"), ctx = cv.getContext("2d");
+let W = 0, H = 0, DPR = 1, scale = 1, CX = 0, CY = 0, view = 0, shake = 0; // view = the seat drawn at the bottom
+function fit() {
+  DPR = Math.min(2, devicePixelRatio || 1); W = innerWidth; H = innerHeight; cv.width = W * DPR; cv.height = H * DPR;
+  scale = ATTRACT ? Math.min(W, H) / (CONFIG.arena + 70) : Math.min(W - 16, H - 92) / (CONFIG.arena + 90); // the preview has no HUD to leave room for
+  CX = W / 2; CY = H / 2 + (ATTRACT ? 0 : 8);
+}
+addEventListener("resize", fit); addEventListener("orientationchange", fit); fit();
+/** Draw in seat `s`'s local view (its wall along y = HA), turned so the viewer's own wall is at the bottom. */
+function seatSpace(s, ox = 0, oy = 0) {
+  const a = ((view - s) * Math.PI) / 2, c = Math.round(Math.cos(a)), n = Math.round(Math.sin(a)), k = DPR * scale;
+  ctx.setTransform(k * c, k * n, -k * n, k * c, DPR * (CX + ox), DPR * (CY + oy));
+}
+/** Screen position of a point in seat `s`'s local view. */
+function screenOf(s, x, y) { const [wx, wy] = toWorld(s, x, y), [vx, vy] = toLocal(view, wx, wy); return [CX + vx * scale, CY + vy * scale]; }
+const padViews = [0, 0, 0, 0]; // where other paddles are drawn, eased toward their last write
+/** Where seat `s`'s paddle is on this screen: mine, a bot's (the host's live one, or eased from state), or another person's. */
+function padOf(g, s) {
+  const id = g.seats[s];
+  if (id === net.sessionId) return me.p;
+  if (id === "bot") return host.wasHost ? (host.bots[s] ? host.bots[s].p : null) : padViews[s];
+  return padViews[s];
+}
+function syncPads(g, dt) {
+  const k = 1 - Math.exp(-dt * 20), s = cached("balls", S.shared.balls, null);
+  for (let i = 0; i < 4; i++) {
+    const id = g.seats[i], raw = id === "bot" ? s && s.p && s.p[i] : (S.entities.players[id] || {}).pad;
+    if (typeof raw === "number") padViews[i] += (raw - padViews[i]) * k;
+  }
+}
+const colorOf = (g, s) => { const id = g.seats[s]; return id === net.sessionId ? myColor : id === "bot" ? botColor(g, s) : (S.entities.players[id] || {}).c || "#ccc"; };
+function botColor(g, s) { const used = g.seats.map((id) => (id === net.sessionId ? myColor : (S.entities.players[id] || {}).c)); return COLORS.filter((c) => !used.includes(c))[s % 4] || COLORS[s]; }
+const parts = [], trails = new Map(), flash = [0, 0, 0, 0];
+let lastFx = 0;
+function sparks(x, y, color, n, speed, life = 0.45) { for (let i = 0; i < n; i++) { const a = Math.random() * Math.PI * 2, s = speed * (0.3 + Math.random()); parts.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, life: life * (0.6 + Math.random() * 0.8), color }); } }
+function hitFx(b, s) { const now = performance.now(); sparks(b.x, b.y, s >= 0 && lastGame ? colorOf(lastGame, s) : "#fff", 12, 300); if (now - lastFx > 50) { lastFx = now; sfx("hit", Math.min(1, Math.hypot(b.vx, b.vy) / CONFIG.maxSpeed)); } }
+function bumpFx() { sfx("wall"); }
+
+function draw(g, dt, now) {
+  view = Math.max(0, g.seats.indexOf(net.sessionId));
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  ctx.fillStyle = "#0a0618"; ctx.fillRect(0, 0, W, H);
+  shake *= Math.exp(-dt * 9);
+  const ox = (Math.random() - 0.5) * shake, oy = (Math.random() - 0.5) * shake;
+  seatSpace(0, ox, oy); // from here on: arena units (seat 0's view is the arena itself)
+  const floor = ctx.createRadialGradient(0, 0, 40, 0, 0, HA * 1.3); floor.addColorStop(0, "#1d1340"); floor.addColorStop(1, "#110b26");
+  ctx.fillStyle = floor; ctx.fillRect(-HA, -HA, 2 * HA, 2 * HA);
+  ctx.strokeStyle = "#ffffff0c"; ctx.lineWidth = 2; ctx.beginPath();
+  for (let v = -HA + 50; v < HA; v += 50) { ctx.moveTo(v, -HA); ctx.lineTo(v, HA); ctx.moveTo(-HA, v); ctx.lineTo(HA, v); }
+  ctx.stroke();
+  ctx.strokeStyle = "#ffffff18"; ctx.beginPath(); ctx.arc(0, 0, 70, 0, Math.PI * 2); ctx.stroke();
+  for (const [sx, sy] of [[-1, -1], [1, -1], [1, 1], [-1, 1]]) { // corner blocks
+    ctx.fillStyle = "#231a46"; ctx.fillRect(sx > 0 ? HA - C : -HA, sy > 0 ? HA - C : -HA, C, C);
+    ctx.strokeStyle = "#5a4a99"; ctx.lineWidth = 3; ctx.strokeRect(sx > 0 ? HA - C : -HA, sy > 0 ? HA - C : -HA, C, C);
+  }
+  for (let s = 0; s < 4; s++) { // each wall in its own view: an open goal line and a paddle, or a closed wall
+    seatSpace(s, ox, oy);
+    const color = colorOf(g, s), alive = g.lives[s] > 0, f = flash[s];
+    flash[s] = Math.max(0, f - dt * 2);
+    if (alive) {
+      ctx.globalAlpha = 0.5 + f * 0.5; ctx.fillStyle = f > 0 ? "#ff3355" : color; ctx.fillRect(-HA + C, HA - 3, 2 * (HA - C), 6); ctx.globalAlpha = 1;
+      const p = padOf(g, s);
+      if (p !== null && g.phase === "play") {
+        ctx.shadowColor = color; ctx.shadowBlur = 18 * scale * DPR;
+        ctx.fillStyle = color; roundRect(p - CONFIG.paddleL / 2, PY - CONFIG.paddleT / 2, CONFIG.paddleL, CONFIG.paddleT, 8);
+        ctx.shadowBlur = 0; ctx.fillStyle = "#ffffff70"; roundRect(p - CONFIG.paddleL / 2 + 8, PY - CONFIG.paddleT / 2 + 3, CONFIG.paddleL - 16, 4, 2);
+      }
+    } else {
+      ctx.fillStyle = "#3a2d6b"; ctx.fillRect(-HA + C, HA - 14, 2 * (HA - C), 14);
+      ctx.strokeStyle = color + "66"; ctx.lineWidth = 2; ctx.beginPath();
+      for (let x = -HA + C + 10; x < HA - C; x += 26) { ctx.moveTo(x, HA - 14); ctx.lineTo(x + 14, HA); }
+      ctx.stroke();
+    }
+  }
+  seatSpace(0, ox, oy);
+  for (const b of balls) { // balls: a trail, a glow, a body; one waiting to launch blinks in the middle
+    const bx = b.x + (b.ox || 0), by = b.y + (b.oy || 0);
+    b.ox = (b.ox || 0) * Math.exp(-dt * 12); b.oy = (b.oy || 0) * Math.exp(-dt * 12);
+    const waiting = b.at > Date.now(), tr = trails.get(b.k) || trails.set(b.k, []).get(b.k);
+    if (waiting) tr.length = 0; else { tr.push([bx, by]); if (tr.length > 10) tr.shift(); }
+    tr.forEach(([x, y], i) => { ctx.fillStyle = `rgba(200,180,255,${(i / tr.length) * 0.25})`; ctx.beginPath(); ctx.arc(x, y, CONFIG.ballR * (0.4 + i / 18), 0, Math.PI * 2); ctx.fill(); });
+    if (waiting && Math.floor(now / 150) % 2) continue;
+    ctx.shadowColor = "#d8c8ff"; ctx.shadowBlur = 16 * scale * DPR;
+    ctx.fillStyle = "#ffffff"; ctx.beginPath(); ctx.arc(bx, by, CONFIG.ballR, 0, Math.PI * 2); ctx.fill();
+    ctx.shadowBlur = 0;
+  }
+  for (const k of [...trails.keys()]) if (!balls.some((b) => b.k === k)) trails.delete(k);
+  for (let i = parts.length - 1; i >= 0; i--) {
+    const p = parts[i]; p.life -= dt; p.x += p.vx * dt; p.y += p.vy * dt; p.vx *= 0.92; p.vy *= 0.92;
+    if (p.life <= 0) { parts.splice(i, 1); continue; }
+    ctx.globalAlpha = Math.min(1, p.life * 2.5); ctx.fillStyle = p.color; ctx.fillRect(p.x - 3, p.y - 3, 6, 6);
+  }
+  ctx.globalAlpha = 1;
+  // names and lives just outside each wall, upright on screen
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0); ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  for (let s = 0; s < 4; s++) { // the side walls' labels run along the wall
+    const side = (s - view + 4) % 4, [x, y] = screenOf(s, 0, HA + 22), color = colorOf(g, s), mine = g.seats[s] === net.sessionId;
+    const label = ATTRACT ? "" : `${mine ? "You" : nameOf(g, s)}  `;
+    const pips = "●".repeat(g.lives[s]) + "○".repeat(Math.max(0, CONFIG.lives - g.lives[s]));
+    ctx.setTransform(DPR, 0, 0, DPR, DPR * (x + ox), DPR * (y + oy)); if (side % 2) ctx.rotate(-Math.PI / 2);
+    ctx.font = `700 ${mine ? 14 : 12}px system-ui, sans-serif`;
+    ctx.fillStyle = g.lives[s] > 0 ? color : "#6b5f99"; ctx.fillText(g.lives[s] > 0 ? label + pips : `${label}OUT`, 0, 0);
+  }
+}
+function roundRect(x, y, w, h, r) { ctx.beginPath(); ctx.roundRect(x, y, w, h, r); ctx.fill(); }
+
+// Sounds, made on the fly with WebAudio (no files).
+let audio = null;
+function unlockAudio() { if (!audio && !ATTRACT) try { audio = new AudioContext(); } catch {} }
+function sfx(kind, power = 1) {
+  if (!audio) return;
+  const t = audio.currentTime, o = audio.createOscillator(), gain = audio.createGain();
+  const [type, f0, f1, len, vol] = { hit: ["square", 440 + power * 440, 440 + power * 440, 0.06, 0.12], wall: ["square", 220, 220, 0.04, 0.06],
+    lose: ["sawtooth", 330, 70, 0.45, 0.14], out: ["sawtooth", 500, 40, 0.8, 0.15], beep: ["sine", 660, 660, 0.12, 0.15], go: ["sine", 990, 990, 0.25, 0.15] }[kind];
+  o.type = type; o.frequency.setValueAtTime(f0, t); o.frequency.exponentialRampToValueAtTime(f1, t + len);
+  gain.gain.setValueAtTime(vol, t); gain.gain.exponentialRampToValueAtTime(0.001, t + len);
+  o.connect(gain).connect(audio.destination); o.start(t); o.stop(t + len + 0.02);
+}
+
+// ── HUD & RESULTS ───────────────────────────────────────────────────────────────────
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+let board = null, boardFor = -1, seen = { lives: "", id: -1, count: -1 }, msgUntil = 0, lastGame = null;
+const startedAt = performance.now();
+function nameOf(g, s) {
+  const id = g.seats[s];
+  if (id === net.sessionId) return myName;
+  if (id === "bot") return BOT_NAMES[s];
+  return String((S.entities.players[id] || {}).n || "Player");
+}
+function say(html, ms, now) { $("msg").innerHTML = html; msgUntil = now + ms; }
+function hud(g, now) {
+  const seat = g.seats.indexOf(net.sessionId), t = Date.now(), lives = g.lives.join();
+  if (seen.id === g.id && lives !== seen.lives) { // a life lost: shown from the state, so everyone sees it
+    const before = seen.lives.split(",").map(Number);
+    g.lives.forEach((n, s) => {
+      if (n >= before[s]) return;
+      flash[s] = 1; shake = Math.max(shake, s === seat ? 16 : 7);
+      const [x, y] = toWorld(s, 0, HA); sparks(x, y, "#ff3355", 26, 520, 0.7);
+      if (s === seat) { say(n > 0 ? `<span style="color:#ff3355">−1</span><small>${n} li${n === 1 ? "fe" : "ves"} left</small>` : `<span style="color:#ff3355">OUT!</span>`, 1300, now); sfx(n > 0 ? "lose" : "out"); }
+      else if (n === 0) { say(`<small style="color:${colorOf(g, s)}">${esc(nameOf(g, s))} is out!</small>`, 1300, now); sfx("lose"); }
+      else sfx("wall");
+    });
+  }
+  if (seen.id !== g.id) msgUntil = 0;
+  seen.lives = lives; seen.id = g.id;
+  const count = g.phase === "play" && t < g.startAt ? Math.ceil((g.startAt - t) / 1000) : 0;
+  if (count !== seen.count) { if (count) { say(String(count), 900, now); sfx("beep"); } else if (seen.count > 0) { say("GO!", 600, now); sfx("go"); } seen.count = count; }
+  $("msg").classList.toggle("on", now < msgUntil);
+  if (ATTRACT) { $("top").textContent = $("hint").textContent = $("net").textContent = ""; return; }
+  const alive = g.lives.filter((n) => n > 0).length;
+  $("top").textContent = seat < 0 ? `Watching · ${alive} left · you're in the next match` : `${alive} paddles left · ${balls.length} ball${balls.length === 1 ? "" : "s"}`;
+  $("hint").textContent = seat < 0 ? "" : touchUI ? "Drag to move your paddle (the bottom wall). Don't let a ball past!" : "Move the mouse (or ← →) to slide your paddle along the bottom wall. Don't let a ball past!";
+  $("hint").style.opacity = now - startedAt < 8000 ? 1 : 0;
+  const n = livePlayers().length;
+  $("net").textContent = net.offline ? "Offline: playing with bots" : `Online · ${n} player${n === 1 ? "" : "s"}${isHost() ? " · you run the balls" : ""}`;
+  const card = g.phase === "over" && t > g.overAt - CONFIG.resultsMs + 1300;
+  if (g.phase === "over" && !card && seen.over !== g.id && now >= msgUntil) { seen.over = g.id; say(g.win < 0 ? "DRAW" : g.win === seat ? `<span style="color:${myColor}">YOU WIN!</span>` : `<small style="color:${colorOf(g, g.win)}">${esc(nameOf(g, g.win))} wins!</small>`, 1300, now); }
+  $("over").hidden = !card;
+  if (card) {
+    const won = seat >= 0 && g.win === seat;
+    $("winner").textContent = won ? "You win!" : g.win < 0 ? "A draw" : `${nameOf(g, g.win)} wins!`;
+    $("winner").style.color = g.win >= 0 ? colorOf(g, g.win) : "#fff";
+    const ranking = [...(g.win >= 0 ? [g.win] : []), ...[...g.out].reverse()];
+    $("ranking").innerHTML = ranking.map((s, i) => `<li class="${s === seat ? "me" : ""}">${esc(s === seat ? "You" : nameOf(g, s))}<span>${i === 0 && g.win >= 0 ? "last one in" : "out"}</span></li>`).join("");
+    $("again").hidden = seat < 0;
+    $("again").textContent = myReady === g.id ? "Waiting for the others…" : "Play again";
+    $("next").textContent = `Next match in ${Math.max(0, Math.ceil((g.overAt - t) / 1000))}s`;
+    if (boardFor !== g.id) { boardFor = g.id; showBoard(won); }
+  }
+}
+function showBoard(won) {
+  const list = $("board");
+  if (!board) { list.innerHTML = "<li>Leaderboards need a connection.</li>"; return; }
+  list.innerHTML = "<li>Loading…</li>";
+  (won ? board.submit(1, "inc").catch(() => null) : Promise.resolve()).then(() => board.top(10)).then(({ entries }) => {
+    list.innerHTML = entries.length ? entries.map((e) => `<li>${esc(e.username || "Player")}<span>${e.score}</span></li>`).join("") : "<li>No wins yet. Be the first.</li>";
+  }).catch(() => { list.innerHTML = "<li>Couldn't load the leaderboard.</li>"; });
+}
+$("again").onclick = () => { const g = game(); if (g && g.phase === "over") { myReady = g.id; net.me.set("rdy", g.id); } };
+
+/** Two players picked the same color at once (the joiner's first state can be empty): the later sessionId picks again. */
+function fixColor() {
+  const others = Object.entries(S.entities.players || {}).filter(([id]) => id !== net.sessionId);
+  if (!others.some(([id, p]) => p.c === myColor && id < net.sessionId)) return;
+  const taken = new Set(others.map(([, p]) => p.c));
+  myColor = COLORS.find((c) => !taken.has(c)) || myColor; net.me.set("c", myColor);
+}
+
+// ── INPUT ───────────────────────────────────────────────────────────────────────────
+const touchUI = matchMedia("(pointer: coarse)").matches && !ATTRACT;
+const keys = new Set();
+/** The pointer slides my paddle: its spot along my wall is how far the pointer is from the middle, on screen. */
+function aim(e) { me.target = clamp((e.clientX - CX) / scale, -PAD_MAX, PAD_MAX); }
+cv.addEventListener("pointermove", (e) => { if (e.pointerType !== "touch" || e.buttons) aim(e); });
+cv.addEventListener("pointerdown", (e) => { e.preventDefault(); unlockAudio(); aim(e); });
+addEventListener("keydown", (e) => { const k = e.key.toLowerCase(); unlockAudio(); if (["arrowleft", "arrowright", " "].includes(k)) e.preventDefault(); keys.add(k); });
+addEventListener("keyup", (e) => keys.delete(e.key.toLowerCase()));
+addEventListener("blur", () => keys.clear());
+document.addEventListener("touchmove", (e) => e.preventDefault(), { passive: false });
+
+// ── MAIN LOOP ───────────────────────────────────────────────────────────────────────
+let last = performance.now(), lastHb = 0, lastHud = 0;
+function frame(now) {
+  const dt = Math.max(0, Math.min(0.05, (now - last) / 1000)); last = now; // the first frame can be stamped before `last`
+  if (now - lastHb > 1000) { lastHb = now; net.me.set("hb", Date.now()); fixColor(); }
+  if (isHost()) hostTick(dt, now); else host.wasHost = false;
+  const g = game();
+  if (g) {
+    lastGame = g;
+    syncPads(g, dt);
+    myTick(dt, g, now);
+    draw(g, dt, now);
+    if (now - lastHud > 100) { lastHud = now; hud(g, now); }
+  }
+  requestAnimationFrame(frame);
+}
+
+(async function start() {
+  net = await connect();
+  net.onState((st) => { S = st; });
+  net.on("hit", (msg, from) => { if (isHost() && msg) applyHit(msg, from); });
+  net.onDisconnect(() => { $("net").textContent = "Reconnecting…"; });
+  if (!net.offline && typeof MP !== "undefined") board = MP.auth({ key: MP_CONNECT.key, apiUrl: MP_CONNECT.apiUrl }).leaderboard(CONFIG.board);
+  const taken = new Set(Object.entries(S.entities.players || {}).filter(([id]) => id !== net.sessionId).map(([, p]) => p.c));
+  myColor = COLORS.find((c) => !taken.has(c)) || COLORS[Math.floor(Math.random() * COLORS.length)];
+  net.me.set({ n: myName, c: myColor, hb: Date.now() });
+  if (ATTRACT) Object.assign(CONFIG, { startBalls: 3, lives: 5, countdownMs: 300, respawnMs: 500, resultsMs: 1500, ballSpeed: 480, botError: 60 });
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
