@@ -68,7 +68,7 @@
  *   - The host moves the balls against the corners, the closed walls, its own paddle and the bot
  *     paddles. Everyone else runs the balls on their own screen between writes and decides THEIR
  *     OWN hits: when your paddle hits a ball on your screen, it bounces at once and you send "hit"
- *     {k, x, y, vx, vy, g}; the host checks it is plausible and adopts it. A ball that goes past
+ *     {k, x, y, vx, vy, g}; the host checks it is plausible and works out the bounce (angle, speed) itself. A ball that goes past
  *     your wall on the host's screen waits `outGrace` ms for your save before you lose the life.
  *   - Someone who joins mid-match takes over a bot's wall (and its lives); someone who leaves
  *     is replaced by a bot. A new host adopts `game` and `balls` and carries on.
@@ -336,9 +336,12 @@ function applyHit(msg, from) {
   if (!g || g.phase !== "play" || msg.g !== g.id) return;
   const s = g.seats.indexOf(from), b = balls.find((q) => q.k === msg.k), x = +msg.x, y = +msg.y, vx = +msg.vx, vy = +msg.vy;
   if (s < 0 || !b || g.lives[s] <= 0 || !isFinite(x + y + vx + vy) || Math.hypot(x - b.x, y - b.y) > 220) return;
-  if (toLocal(s, x, y)[1] < HA - 140) return; // a hit happens by your own wall
-  const k = Math.min(1, CONFIG.maxSpeed / (Math.hypot(vx, vy) || 1));
-  Object.assign(b, { x, y, vx: vx * k, vy: vy * k }); b.h++;
+  const [lx, ly] = toLocal(s, x, y), [lvx, lvy] = toLocal(s, vx, vy);
+  if (ly < HA - 140 || lvy >= 0) return; // a hit happens by your own wall and sends the ball away from it
+  if (toLocal(s, b.vx, b.vy)[1] <= 0 && !host.pending.has(b.k)) return; // the ball is already leaving your wall: one hit per visit
+  // the host works the bounce out itself, as hitPaddle would: the sender's angle (no flatter than a paddle tip gives), one speed-up
+  const a = clamp(Math.atan2(lvx, -lvy), -CONFIG.maxAngle, CONFIG.maxAngle), sp = Math.min(CONFIG.maxSpeed, Math.hypot(b.vx, b.vy) * CONFIG.speedUp);
+  [b.x, b.y] = toWorld(s, lx, Math.min(ly, PY - CONFIG.ballR - CONFIG.paddleT / 2)); [b.vx, b.vy] = toWorld(s, Math.sin(a) * sp, -Math.cos(a) * sp); b.h++;
   host.pending.delete(b.k); // saved on the line
   hitFx(b, s); writeBalls();
 }
